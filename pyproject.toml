@@ -26,14 +26,17 @@ dependencies = [
     "audiomentations>=0.30.0",
     "datasets>=2.0.0",
     "google-genai>=1.0.0",
+    "huggingface-hub>=0.20.0",
     "librosa>=0.10.0",
     "mutagen>=1.45.0",
     "numba>=0.60.0",
     "numpy>=1.24.0",
     "onnx>=1.14.0",
     "openwakeword>=0.6.0",
+    "pandas>=2.0.0",
     "piper-tts>=1.2.0",
     "pronouncing>=0.2.0",
+    "pyarrow>=14.0.0",
     "python-dotenv>=1.0.0",
     "scipy>=1.10.0,<1.17.0",
     "speechbrain>=1.0.0",
@@ -42,6 +45,8 @@ dependencies = [
     "torchaudio>=2.0.0,<2.9.0",
     "soundfile>=0.12.0",
     "tqdm>=4.65.0",
+    "deep-phonemizer>=0.0.19",
+    "onnxruntime-gpu>=1.23.2",
 ]
 
 [project.urls]

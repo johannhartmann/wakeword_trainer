@@ -255,43 +255,34 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
 
         self.rir_dir.mkdir(parents=True, exist_ok=True)
 
-        if len(list(self.rir_dir.glob("*.wav"))) > 100:
+        if len(list(self.rir_dir.glob("*.wav"))) > 50:
             print("RIRs already downloaded")
             return
 
-        print("Downloading MIT room impulse responses...")
-
-        # Download pre-packaged RIRs directly (faster and more reliable)
-        rir_zip = self.output_dir / "mit_rirs.zip"
-        rir_url = "https://f002.backblazeb2.com/file/openwakeword-resources/data/mit_rirs.zip"
+        print("Downloading MIT room impulse responses from HuggingFace...")
 
         try:
-            if not rir_zip.exists():
-                subprocess.run(["wget", "-q", "--show-progress", "-O", str(rir_zip), rir_url], check=True)
-            subprocess.run(["unzip", "-q", "-o", str(rir_zip), "-d", str(self.rir_dir)], check=True)
+            from huggingface_hub import snapshot_download
+            import shutil
+
+            # Download the entire dataset (contains WAV files in 16khz folder)
+            cache_dir = snapshot_download(
+                repo_id="davidscripka/MIT_environmental_impulse_responses",
+                repo_type="dataset",
+                allow_patterns="16khz/*.wav",
+            )
+
+            # Copy WAV files from cache to our rir_dir
+            source_dir = Path(cache_dir) / "16khz"
+            for wav_file in tqdm(list(source_dir.glob("*.wav")), desc="Copying RIRs"):
+                dest_path = self.rir_dir / wav_file.name
+                if not dest_path.exists():
+                    shutil.copy2(wav_file, dest_path)
+
             print(f"Downloaded {len(list(self.rir_dir.glob('*.wav')))} RIR files")
         except Exception as e:
-            print(f"Warning: Could not download RIRs from primary source: {e}")
-            # Fallback: try HuggingFace datasets with soundfile
-            try:
-                import soundfile as sf
-                rir_dataset = datasets.load_dataset(
-                    "davidscripka/MIT_environmental_impulse_responses",
-                    split="train",
-                    streaming=True,
-                    trust_remote_code=True
-                )
-                for i, row in enumerate(tqdm(rir_dataset, desc="Downloading RIRs (fallback)")):
-                    if i >= 500:  # Limit to 500 RIRs
-                        break
-                    name = f"rir_{i:04d}.wav"
-                    output_path = self.rir_dir / name
-                    if not output_path.exists():
-                        wav_data = (row['audio']['array'] * 32767).astype(np.int16)
-                        sf.write(str(output_path), wav_data, 16000)
-            except Exception as e2:
-                print(f"Warning: Could not download RIRs (fallback failed): {e2}")
-                print("Training will continue without RIR augmentation")
+            print(f"Warning: Could not download RIRs: {e}")
+            print("Training will continue without RIR augmentation")
 
     def download_background_audio(self) -> None:
         """Download background audio for mixing (AudioSet + FMA samples)."""
@@ -530,6 +521,15 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
         import soundfile as sf
 
         self.clips_augmented_dir.mkdir(parents=True, exist_ok=True)
+
+        # Check if augmented clips already exist
+        existing_augmented = len(list(self.clips_augmented_dir.glob("*.wav")))
+        source_clips = len(list(self.clips_dir.glob("*.wav")))
+        expected_augmented = source_clips * self.augmentation_rounds
+
+        if existing_augmented >= expected_augmented * 0.9:
+            print(f"Reusing {existing_augmented} existing augmented clips (expected: {expected_augmented})")
+            return
 
         # Get valid clip paths
         clip_paths = [p for p in self.clips_dir.glob("*.wav") if self.validate_wav(p)]
@@ -981,31 +981,39 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
             print("\n=== Step 2: Generating synthetic speech ===")
             self.clips_dir.mkdir(parents=True, exist_ok=True)
 
-            # Calculate clips per voice per phrase
-            n_per_phrase = self.n_samples // (len(PIPER_VOICES) * len(self.phrases))
-            n_per_phrase = max(1, n_per_phrase)
+            # Check if we already have enough clips (within 10% of target)
+            existing_clips = len(list(self.clips_dir.glob("*.wav")))
+            target_clips = self.n_samples
 
-            print(f"Generating {n_per_phrase} clips per phrase per voice")
-            print(f"Total target: ~{n_per_phrase * len(PIPER_VOICES) * len(self.phrases)} clips")
+            if existing_clips >= target_clips * 0.9:
+                print(f"Reusing {existing_clips} existing clips (target: {target_clips})")
+            else:
+                # Calculate clips per voice per phrase
+                n_per_phrase = self.n_samples // (len(PIPER_VOICES) * len(self.phrases))
+                n_per_phrase = max(1, n_per_phrase)
 
-            total_clips = 0
-            for voice_name, _ in tqdm(PIPER_VOICES, desc="Generating clips per voice"):
-                voice_path = self.voice_dir / f"{voice_name}.onnx"
-                if voice_path.exists():
-                    n = self.generate_clips(voice_path, self.phrases, n_per_phrase, self.clips_dir)
-                    total_clips += n
+                print(f"Generating {n_per_phrase} clips per phrase per voice")
+                print(f"Total target: ~{n_per_phrase * len(PIPER_VOICES) * len(self.phrases)} clips")
 
-            print(f"Total synthetic clips generated: {total_clips}")
+                total_clips = 0
+                for voice_name, _ in tqdm(PIPER_VOICES, desc="Generating clips per voice"):
+                    voice_path = self.voice_dir / f"{voice_name}.onnx"
+                    if voice_path.exists():
+                        n = self.generate_clips(voice_path, self.phrases, n_per_phrase, self.clips_dir)
+                        total_clips += n
 
-            # Resample to 16kHz and validate
-            print("Resampling and validating clips...")
-            for clip in tqdm(list(self.clips_dir.glob("*.wav")), desc="Resampling to 16kHz"):
-                self.resample_to_16k(clip)
+                print(f"Total synthetic clips generated: {total_clips}")
 
-            # Clean up corrupted files
-            removed = self.cleanup_corrupted_files(self.clips_dir)
-            if removed > 0:
-                print(f"Removed {removed} corrupted clips")
+                # Resample to 16kHz and validate
+                print("Resampling and validating clips...")
+                for clip in tqdm(list(self.clips_dir.glob("*.wav")), desc="Resampling to 16kHz"):
+                    self.resample_to_16k(clip)
+
+                # Clean up corrupted files
+                removed = self.cleanup_corrupted_files(self.clips_dir)
+                if removed > 0:
+                    print(f"Removed {removed} corrupted clips")
+
             valid_clips = len(list(self.clips_dir.glob("*.wav")))
             print(f"Valid clips: {valid_clips}")
 
@@ -1013,24 +1021,28 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
             print("\n=== Step 2b: Generating adversarial clips ===")
             self.adversarial_dir.mkdir(parents=True, exist_ok=True)
 
-            n_adv_per_phrase = max(1, 50 // len(self.adversarial_phrases[:20]))  # Limit to 20 phrases
+            existing_adversarial = len(list(self.adversarial_dir.glob("*.wav")))
+            if existing_adversarial >= 100:
+                print(f"Reusing {existing_adversarial} existing adversarial clips")
+            else:
+                n_adv_per_phrase = max(1, 50 // len(self.adversarial_phrases[:20]))  # Limit to 20 phrases
 
-            total_adversarial = 0
-            for voice_name, _ in tqdm(PIPER_VOICES[:5], desc="Generating adversarial clips"):  # Use 5 voices
-                voice_path = self.voice_dir / f"{voice_name}.onnx"
-                if voice_path.exists():
-                    n = self.generate_clips(voice_path, self.adversarial_phrases[:20], n_adv_per_phrase, self.adversarial_dir)
-                    total_adversarial += n
+                total_adversarial = 0
+                for voice_name, _ in tqdm(PIPER_VOICES[:5], desc="Generating adversarial clips"):  # Use 5 voices
+                    voice_path = self.voice_dir / f"{voice_name}.onnx"
+                    if voice_path.exists():
+                        n = self.generate_clips(voice_path, self.adversarial_phrases[:20], n_adv_per_phrase, self.adversarial_dir)
+                        total_adversarial += n
 
-            print(f"Total adversarial clips generated: {total_adversarial}")
+                print(f"Total adversarial clips generated: {total_adversarial}")
 
-            for clip in tqdm(list(self.adversarial_dir.glob("*.wav")), desc="Resampling adversarial to 16kHz"):
-                self.resample_to_16k(clip)
+                for clip in tqdm(list(self.adversarial_dir.glob("*.wav")), desc="Resampling adversarial to 16kHz"):
+                    self.resample_to_16k(clip)
 
-            # Clean up corrupted adversarial files
-            removed = self.cleanup_corrupted_files(self.adversarial_dir)
-            if removed > 0:
-                print(f"Removed {removed} corrupted adversarial clips")
+                # Clean up corrupted adversarial files
+                removed = self.cleanup_corrupted_files(self.adversarial_dir)
+                if removed > 0:
+                    print(f"Removed {removed} corrupted adversarial clips")
 
         # Step 3: Augment clips (optional but recommended)
         if not skip_tts and self.augmentation_rounds > 0:
