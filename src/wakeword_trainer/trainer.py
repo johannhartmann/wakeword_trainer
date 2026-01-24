@@ -77,20 +77,23 @@ def generate_phrases_with_llm(wake_word: str) -> tuple[list[str], list[str]]:
 
     prompt = f'''Generate SHORT phrases for training a wake word detection model for "{wake_word}".
 
+CRITICAL: Use the wake word EXACTLY as provided: "{wake_word}" - do NOT change spelling, capitalization, or formatting.
+
 IMPORTANT: Each phrase must be speakable in under 1.5 seconds (max 3-4 syllables total).
-Only use short prefixes like "Hey", "Hi", "Ok". Do NOT add words after the wake word.
+Only use short prefixes like "hey", "hi", "ok". Do NOT add words after the wake word.
 
 Return a JSON object with one array:
 "phrases": 6-10 short variations of the wake word
 
-Example for "Alexa":
-{{"phrases": ["Alexa", "Hey Alexa", "Ok Alexa", "Hi Alexa"]}}
+Example for "alexa":
+{{"phrases": ["alexa", "hey alexa", "ok alexa", "hi alexa"]}}
 
-BAD examples (too long): "Alexa can you", "Hey Alexa please help", "Alexa wake up"
-GOOD examples (short): "Alexa", "Hey Alexa", "Ok Alexa"
+BAD examples (too long): "alexa can you", "hey alexa please help", "alexa wake up"
+BAD examples (wrong spelling): "Alexa" when input was "alexa", "GLaDOS" when input was "glados"
+GOOD examples (short, exact spelling): "alexa", "hey alexa", "ok alexa"
 
 Return ONLY valid JSON, no markdown.
-Wake word: "{wake_word}"'''
+Wake word (use exactly as shown): "{wake_word}"'''
 
     response = client.models.generate_content(
         model="gemini-2.0-flash",
