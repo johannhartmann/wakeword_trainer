@@ -920,9 +920,7 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
         """Test the trained model."""
         model_path = self.output_dir / f"{self.wake_word}.onnx"
         oww = openwakeword.Model(
-            wakeword_model_paths=[str(model_path)],
-            enable_speex_noise_suppression=False,
-            vad_threshold=0.5
+            wakeword_models=[str(model_path)],
         )
 
         print(f"\nTesting model: {self.wake_word}")
