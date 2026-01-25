@@ -142,6 +142,7 @@ librispeech_clips/
 mit_rirs/
 mit_rirs.zip
 *.onnx
+!models/*.onnx
 
 # Misc
 .DS_Store
