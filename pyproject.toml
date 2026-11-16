@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Train custom wake word models for openWakeWord using LLM-generated phrases"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
     { name = "Johann Hartmann" }
 ]
@@ -14,7 +14,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
@@ -34,6 +33,8 @@ dependencies = [
     "onnx>=1.23.2",
     "openwakeword>=0.6.0",
     "pandas>=2.3.3",
+    # Security floor for transitive matplotlib/tensorboard image processing.
+    "pillow>=13.0.0",
     "piper-tts>=1.8.0",
     "pronouncing>=0.3.0",
     "pyarrow>=25.0.1",

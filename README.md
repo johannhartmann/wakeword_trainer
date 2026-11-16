@@ -73,10 +73,14 @@ replacement to download; updating them requires retraining.
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+ (Python 3.12 recommended)
 - CUDA-capable GPU (recommended, 8GB+ VRAM)
 - ~15GB disk space for training data and pre-computed features
 - Gemini API key for phrase generation
+
+Python 3.10 is no longer supported because Pillow 13's security fixes require
+Python 3.11 or newer. Pillow 13 is an explicit minimum so dependency resolution
+cannot fall back to vulnerable Pillow 12 versions.
 
 ## Quick Start
 
