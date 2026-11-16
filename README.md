@@ -16,17 +16,60 @@ A CLI tool to train custom wake word models for [openWakeWord](https://github.co
 ## Installation
 
 ```bash
-# Using uv (recommended)
-uv pip install wakeword-trainer
-
-# Or using pip
-pip install wakeword-trainer
-
-# Or install from source
-git clone https://github.com/johannhartmann/wakeword-trainer.git
-cd wakeword-trainer
-uv pip install -e .
+# Install from source with the tested dependency lockfile (recommended)
+git clone https://github.com/johannhartmann/wakeword_trainer.git
+cd wakeword_trainer
+uv sync --python 3.12 --locked
+source .venv/bin/activate
 ```
+
+Use `uv sync --locked` to install updates after pulling repository changes.
+For dependency maintenance, run `uv lock --upgrade`, `uv sync --locked`, and
+`uv run --locked python -m unittest discover -s tests -v`.
+
+The uv configuration selects ONNX Runtime GPU instead of installing both the
+CPU and GPU packages, which share the `onnxruntime` module. It also skips the
+unused TFLite runtime. Use `uv sync` so these dependency overrides are applied;
+`pip` and `uv pip install` do not apply them.
+
+SciPy stays below 1.17 because `acoustics`, used by openWakeWord, imports the
+removed `scipy.special.sph_harm` function. Librosa stays on 0.11 because of
+Audiomentations' dependency constraint.
+
+## Model versions
+
+Upstream model selections were checked on **2026-11-16**:
+
+| Component | Selected model |
+|-----------|----------------|
+| Phrase generation and adversarial fallback | [`gemini-4-hydrogen`](https://aistudio.google.com/docs/models/gemini-4-hydrogen), with JSON response schemas |
+| Piper voices | [`rhasspy/piper-voices`](https://huggingface.co/rhasspy/piper-voices/tree/e9ab671f2a0e50a701b34361136ba3e6a3a9eb0c), snapshot `e9ab671f2a0e50a701b34361136ba3e6a3a9eb0c` |
+| Mel spectrogram and speech embeddings | [openWakeWord v0.5.1 weights](https://github.com/dscripka/openWakeWord/releases/tag/v0.5.1), still the current published feature models |
+| Out-of-dictionary phonemes | [DeepPhonemizer `en_us_cmudict_forward`](https://github.com/axelspringer/DeepPhonemizer#pretrained-models), still the published ARPABET checkpoint used by openWakeWord; Gemini handles failures |
+
+All ten Piper voices use matching weights and configs from the pinned snapshot.
+Lessac, LJSpeech, and Cori now use their high-quality variants; LibriTTS already
+used high quality. The other six voices use their available medium variants.
+
+Download or refresh model assets without starting training or requiring a Gemini key:
+
+```bash
+uv run --locked wakeword-trainer --update-models --output-dir .
+```
+
+This replaces stale voice files, repairs missing configs, and verifies the
+openWakeWord feature model checksums. Normal training also synchronizes the
+voice snapshot unless `--skip-download` is supplied. Only the ONNX feature
+models used by this pipeline are downloaded; unused TFLite and legacy Silero
+VAD downloads have been removed. VAD filtering remains disabled.
+
+The feature weights must match the precomputed ACAV100M embeddings. A newer
+Python package version does not imply newer feature weights.
+
+Previously generated clips and feature caches are retained. Use a fresh output
+directory to train entirely with the refreshed voices. The bundled
+`models/kitt.onnx` and `models/glados.onnx` are trained outputs, with no upstream
+replacement to download; updating them requires retraining.
 
 ## Requirements
 
@@ -101,6 +144,7 @@ wakeword-trainer <wake_word> [options]
 | `--no-rirs` | - | Don't download room impulse responses |
 | `--skip-tts` | - | Skip TTS generation (use existing clips) |
 | `--skip-download` | - | Skip downloading data (voices, RIRs, negative features) |
+| `--update-models` | - | Refresh model assets only; omit `wake_word` |
 
 ### Examples
 
@@ -157,7 +201,10 @@ Neural network with cosine LR decay:
 import openwakeword
 
 # Load your custom model
-model = openwakeword.Model(wakeword_models=['jarvis.onnx'])
+model = openwakeword.Model(
+    wakeword_models=['jarvis.onnx'],
+    inference_framework="onnx",
+)
 
 # Process audio (16kHz, 16-bit PCM)
 prediction = model.predict(audio_chunk)
@@ -207,6 +254,7 @@ With recommended settings (50k samples, 50k steps):
 |----------|-------------|
 | `GEMINI_API_KEY` | Required. Gemini API key for phrase generation |
 | `GOOGLE_API_KEY` | Alternative to GEMINI_API_KEY |
+| `GEMINI_MODEL` | Optional. Phrase generation model (default: `gemini-4-hydrogen`) |
 
 Create a `.env` file in your working directory:
 ```
@@ -245,6 +293,6 @@ MIT License
 ## Credits
 
 - [openWakeWord](https://github.com/dscripka/openWakeWord) - Wake word detection framework
-- [Piper TTS](https://github.com/rhasspy/piper) - Text-to-speech synthesis
+- [Piper TTS](https://github.com/OHF-Voice/piper1-gpl) - Text-to-speech synthesis
 - [Google Gemini](https://ai.google.dev/) - Phrase generation
 - [ACAV100M](https://huggingface.co/datasets/davidscripka/openwakeword_features) - Pre-computed negative features

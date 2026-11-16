@@ -3,8 +3,6 @@
 import argparse
 import sys
 
-from .trainer import WakeWordTrainer
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -24,6 +22,7 @@ Examples:
 
 Environment variables:
   GEMINI_API_KEY or GOOGLE_API_KEY    Required. API key for Gemini LLM.
+  GEMINI_MODEL                       Optional. Gemini model for phrase generation.
 
 Official recommendations:
   - n_samples: 10,000 minimum, 50,000-100,000 for best results
@@ -38,6 +37,7 @@ Official recommendations:
     parser.add_argument(
         "wake_word",
         type=str,
+        nargs="?",
         help="Wake word to train (e.g., 'glados', 'jarvis', 'alexa')"
     )
     parser.add_argument(
@@ -107,6 +107,11 @@ Official recommendations:
 
     # Skip options
     parser.add_argument(
+        "--update-models",
+        action="store_true",
+        help="Download the current pinned Piper and openWakeWord models without training or an API key"
+    )
+    parser.add_argument(
         "--skip-tts",
         action="store_true",
         help="Skip TTS generation (use existing clips)"
@@ -118,6 +123,20 @@ Official recommendations:
     )
 
     args = parser.parse_args()
+
+    if args.update_models:
+        if args.wake_word:
+            parser.error("--update-models runs without a wake_word; run training separately")
+        from pathlib import Path
+        from .model_assets import download_openwakeword_models, download_piper_voices
+        download_piper_voices(Path(args.output_dir) / "piper_voices")
+        download_openwakeword_models()
+        print("Model assets are up to date.")
+        return 0
+    if not args.wake_word:
+        parser.error("wake_word is required unless --update-models is used")
+
+    from .trainer import WakeWordTrainer
 
     trainer = WakeWordTrainer(
         wake_word=args.wake_word,

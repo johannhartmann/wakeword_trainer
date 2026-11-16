@@ -23,38 +23,39 @@ classifiers = [
 
 dependencies = [
     "acoustics>=0.2.6",
-    "audiomentations>=0.30.0",
-    "datasets>=2.0.0",
-    "google-genai>=1.0.0",
-    "huggingface-hub>=0.20.0",
-    "librosa>=0.10.0",
-    "mutagen>=1.45.0",
-    "numba>=0.60.0",
-    "numpy>=1.24.0",
-    "onnx>=1.14.0",
+    "audiomentations>=0.43.1",
+    "datasets>=5.2.0",
+    "google-genai>=2.33.0",
+    "huggingface-hub>=2.4.0",
+    "librosa>=0.11.0",
+    "mutagen>=1.48.1",
+    "numba>=0.68.1",
+    "numpy>=2.2.6",
+    "onnx>=1.23.2",
     "openwakeword>=0.6.0",
-    "pandas>=2.0.0",
-    "piper-tts>=1.2.0",
-    "pronouncing>=0.2.0",
-    "pyarrow>=14.0.0",
-    "python-dotenv>=1.0.0",
-    "scipy>=1.10.0,<1.17.0",
-    "speechbrain>=1.0.0",
-    "torch>=2.6.0",
-    "torch-audiomentations>=0.11.0",
-    "torchaudio>=2.6.0",
-    "protobuf>=5.29.0",
-    "wheel>=0.46.0",
-    "soundfile>=0.12.0",
-    "tqdm>=4.65.0",
+    "pandas>=2.3.3",
+    "piper-tts>=1.8.0",
+    "pronouncing>=0.3.0",
+    "pyarrow>=25.0.1",
+    "python-dotenv>=1.2.4",
+    # acoustics imports scipy.special.sph_harm, removed in SciPy 1.17.
+    "scipy>=1.15.3,<1.17.0",
+    "speechbrain>=1.1.2",
+    "torch>=2.14.1",
+    "torch-audiomentations>=0.12.0",
+    "torchaudio>=2.11.1",
+    "protobuf>=7.36.2",
+    "wheel>=0.48.0",
+    "soundfile>=0.14.0",
+    "tqdm>=4.70.1",
     "deep-phonemizer>=0.0.19",
     "onnxruntime-gpu>=1.23.2",
 ]
 
 [project.urls]
-Homepage = "https://github.com/johannhartmann/wakeword-trainer"
-Repository = "https://github.com/johannhartmann/wakeword-trainer"
-Issues = "https://github.com/johannhartmann/wakeword-trainer/issues"
+Homepage = "https://github.com/johannhartmann/wakeword_trainer"
+Repository = "https://github.com/johannhartmann/wakeword_trainer"
+Issues = "https://github.com/johannhartmann/wakeword_trainer/issues"
 
 [project.scripts]
 wakeword-trainer = "wakeword_trainer.__main__:main"
@@ -67,5 +68,9 @@ build-backend = "hatchling.build"
 packages = ["src/wakeword_trainer"]
 
 [tool.uv]
-# openwakeword requires tflite-runtime on Linux which doesn't support Python 3.13
-override-dependencies = ["tflite-runtime ; python_version < '0'"]
+# Use ONNX instead of TFLite and install only one ONNX Runtime implementation.
+# onnxruntime-gpu supplies the same Python module as onnxruntime.
+override-dependencies = [
+    "tflite-runtime ; python_version < '0'",
+    "onnxruntime ; python_version < '0'",
+]

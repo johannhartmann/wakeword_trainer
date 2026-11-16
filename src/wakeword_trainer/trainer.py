@@ -22,21 +22,32 @@ from scipy import signal
 from scipy.io import wavfile
 from tqdm import tqdm
 
-import datasets
 import openwakeword
 import openwakeword.data
 import openwakeword.utils
 import torch
 from torch import nn
 from google import genai
+from speechbrain.dataio import audio_io
+
+from .model_assets import (
+    DEFAULT_GEMINI_MODEL,
+    PIPER_VOICES,
+    download_openwakeword_models,
+    download_piper_voices,
+)
+
+
+# openWakeWord 0.6 calls torchaudio.info (removed in 2.9) and torchaudio.load.
+# SpeechBrain provides compatible soundfile-backed I/O without TorchCodec.
+openwakeword.data.torchaudio = audio_io
 
 
 def _patch_openwakeword_mix_clips_batch():
-    """Monkey-patch openwakeword.data.mix_clips_batch to fix numpy/torch bug.
+    """Patch openwakeword.data.mix_clips_batch to keep filtering in NumPy.
 
-    Bug in openwakeword 0.6.0: After converting to numpy at line 463,
-    the code tries to call .max(dim=1) which is torch syntax.
-    Should be .max(axis=1) for numpy arrays.
+    openwakeword 0.6.0 uses torch's max(dim=1) on a NumPy array.
+    Its torch index tensor also squeezes one-row batches with current NumPy.
     """
     import openwakeword.data as oww_data
     import inspect
@@ -44,11 +55,10 @@ def _patch_openwakeword_mix_clips_batch():
     # Get the original source code
     original_source = inspect.getsource(oww_data.mix_clips_batch)
 
-    # Fix the bug: change .max(dim=1) to .max(axis=1) after conversion to numpy
-    # The buggy line is: error_index = torch.from_numpy(np.where(mixed_clips_batch.max(dim=1) != 0)[0])
+    # Use a NumPy index array so even a single surviving clip stays two-dimensional.
     patched_source = original_source.replace(
-        "mixed_clips_batch.max(dim=1) != 0",
-        "mixed_clips_batch.max(axis=1) != 0"
+        "torch.from_numpy(np.where(mixed_clips_batch.max(dim=1) != 0)[0])",
+        "np.flatnonzero(np.any(mixed_clips_batch != 0, axis=1))"
     )
 
     # Compile and execute the patched function
@@ -64,7 +74,7 @@ def _patch_openwakeword_mix_clips_batch():
 _patch_openwakeword_mix_clips_batch()
 
 
-def generate_phrases_with_llm(wake_word: str) -> tuple[list[str], list[str]]:
+def generate_phrases_with_llm(wake_word: str) -> list[str]:
     """Generate training phrases using Gemini LLM."""
     from dotenv import load_dotenv
     load_dotenv()
@@ -96,8 +106,16 @@ Return ONLY valid JSON, no markdown.
 Wake word (use exactly as shown): "{wake_word}"'''
 
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model=os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
         contents=prompt,
+        config={
+            "response_mime_type": "application/json",
+            "response_json_schema": {
+                "type": "object",
+                "properties": {"phrases": {"type": "array", "items": {"type": "string"}}},
+                "required": ["phrases"],
+            },
+        },
     )
 
     text = response.text.strip()
@@ -128,21 +146,6 @@ def generate_adversarial_from_phonemes(wake_word: str, n_samples: int = 500) -> 
         print(f"Warning: Phoneme-based adversarial generation failed: {e}")
         print("Falling back to LLM-based generation")
         return []
-
-
-# Default Piper TTS voices (multi-speaker for diversity)
-PIPER_VOICES = [
-    ("en_US-lessac-medium", "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx"),
-    ("en_US-libritts-high", "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/libritts/high/en_US-libritts-high.onnx"),
-    ("en_US-amy-medium", "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx"),
-    ("en_US-joe-medium", "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/joe/medium/en_US-joe-medium.onnx"),
-    ("en_US-kusal-medium", "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/kusal/medium/en_US-kusal-medium.onnx"),
-    ("en_US-l2arctic-medium", "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/l2arctic/medium/en_US-l2arctic-medium.onnx"),
-    ("en_US-ljspeech-medium", "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/medium/en_US-ljspeech-medium.onnx"),
-    ("en_GB-alba-medium", "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/alba/medium/en_GB-alba-medium.onnx"),
-    ("en_GB-aru-medium", "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/aru/medium/en_GB-aru-medium.onnx"),
-    ("en_GB-cori-medium", "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/cori/medium/en_GB-cori-medium.onnx"),
-]
 
 
 class WakeWordTrainer:
@@ -230,7 +233,14 @@ Return ONLY a JSON array of strings, no explanation.
 Example: ["a lecture", "I'll ask her", "elect a"]'''
 
         try:
-            response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+            response = client.models.generate_content(
+                model=os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "response_json_schema": {"type": "array", "items": {"type": "string"}},
+                },
+            )
             text = response.text.strip()
             if text.startswith("```"):
                 text = text.split("\n", 1)[1].rsplit("```", 1)[0]
@@ -240,16 +250,7 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
 
     def download_piper_voices(self) -> None:
         """Download Piper TTS voices."""
-        self.voice_dir.mkdir(parents=True, exist_ok=True)
-
-        for voice_name, url in PIPER_VOICES:
-            onnx_path = self.voice_dir / f"{voice_name}.onnx"
-            json_path = self.voice_dir / f"{voice_name}.onnx.json"
-
-            if not onnx_path.exists():
-                print(f"Downloading {voice_name}...")
-                subprocess.run(["wget", "-q", "-O", str(onnx_path), url], check=True)
-                subprocess.run(["wget", "-q", "-O", str(json_path), f"{url}.json"], check=True)
+        download_piper_voices(self.voice_dir)
 
     def download_rirs(self) -> None:
         """Download MIT room impulse responses for reverberation augmentation."""
@@ -346,23 +347,7 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
 
     def download_openwakeword_models(self) -> None:
         """Download openwakeword embedding models if missing."""
-        import openwakeword
-        oww_path = Path(openwakeword.__file__).parent / "resources" / "models"
-        oww_path.mkdir(parents=True, exist_ok=True)
-
-        models = [
-            ("melspectrogram.onnx", "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/melspectrogram.onnx"),
-            ("melspectrogram.tflite", "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/melspectrogram.tflite"),
-            ("embedding_model.onnx", "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx"),
-            ("embedding_model.tflite", "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.tflite"),
-            ("silero_vad.onnx", "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/silero_vad.onnx"),
-        ]
-
-        for model_name, url in models:
-            model_path = oww_path / model_name
-            if not model_path.exists():
-                print(f"Downloading openwakeword model: {model_name}...")
-                subprocess.run(["wget", "-q", "-O", str(model_path), url], check=True)
+        download_openwakeword_models()
 
     def validate_wav(self, path: Path) -> bool:
         """Validate that a WAV file is readable and has valid audio data."""
@@ -909,6 +894,9 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
             str(output_path),
             input_names=['input'],
             output_names=[self.wake_word],
+            # Keep the single-file export and dynamic axes used by openWakeWord.
+            dynamo=False,
+            opset_version=17,
             dynamic_axes={'input': {0: 'batch_size'}, self.wake_word: {0: 'batch_size'}}
         )
 
@@ -921,6 +909,7 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
         model_path = self.output_dir / f"{self.wake_word}.onnx"
         oww = openwakeword.Model(
             wakeword_models=[str(model_path)],
+            inference_framework="onnx",
         )
 
         print(f"\nTesting model: {self.wake_word}")
