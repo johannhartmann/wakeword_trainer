@@ -38,6 +38,7 @@ class CompatibilityTests(unittest.TestCase):
         for selected in (None, "custom-gemini-model"):
             with self.subTest(selected=selected), patch.dict(os.environ, {"GEMINI_API_KEY": "test"}), \
                     patch.object(trainer.genai, "Client") as client, \
+                    patch.object(trainer, "_get_openrouter_api_key", return_value=None), \
                     patch("dotenv.load_dotenv"):
                 os.environ.pop("GEMINI_MODEL", None)
                 if selected:

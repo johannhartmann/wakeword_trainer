@@ -10,11 +10,15 @@ Aligned with official openWakeWord training recommendations:
 """
 
 import collections
+import itertools
 import json
 import os
 import random
-import subprocess
+import re
 from pathlib import Path
+from urllib.request import Request, urlopen, urlretrieve
+from urllib.error import HTTPError
+import zipfile
 
 import numpy as np
 from numpy.lib.format import open_memmap
@@ -74,16 +78,57 @@ def _patch_openwakeword_mix_clips_batch():
 _patch_openwakeword_mix_clips_batch()
 
 
-def generate_phrases_with_llm(wake_word: str) -> list[str]:
-    """Generate training phrases using Gemini LLM."""
+def _get_openrouter_api_key() -> str | None:
+    """Read just the OpenRouter credential from the environment or home .env."""
+    from dotenv import dotenv_values
+    return os.environ.get("OPENROUTER_API_KEY") or dotenv_values(Path.home() / ".env").get("OPENROUTER_API_KEY")
+
+
+def _generate_json_with_llm(prompt: str, schema: dict) -> str:
     from dotenv import load_dotenv
     load_dotenv()
+    openrouter_key = _get_openrouter_api_key()
+    model = os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+    if openrouter_key:
+        model = os.environ.get("OPENROUTER_MODEL", f"google/{model}")
+        request = Request(
+            "https://openrouter.ai/api/v1/chat/completions",
+            data=json.dumps({
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "training_phrases", "strict": True, "schema": schema},
+                },
+                "provider": {"require_parameters": True},
+                "reasoning": {"effort": "low"},
+                "max_tokens": 8192,
+            }).encode(),
+            headers={"Authorization": f"Bearer {openrouter_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=120) as response:
+                payload = json.load(response)
+        except HTTPError as error:
+            raise RuntimeError(f"OpenRouter returned HTTP {error.code}") from None
+        text = payload["choices"][0]["message"]["content"]
+    else:
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("OPENROUTER_API_KEY (environment or ~/.env), GEMINI_API_KEY, or GOOGLE_API_KEY required")
+        response = genai.Client(api_key=api_key).models.generate_content(
+            model=model, contents=prompt,
+            config={"response_mime_type": "application/json", "response_json_schema": schema},
+        )
+        text = response.text
+    if not text:
+        raise ValueError("LLM returned an empty response")
+    return text.strip()
 
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY or GOOGLE_API_KEY environment variable required")
 
-    client = genai.Client(api_key=api_key)
+def generate_phrases_with_llm(wake_word: str) -> list[str]:
+    """Generate training phrases using Gemini LLM."""
 
     prompt = f'''Generate SHORT phrases for training a wake word detection model for "{wake_word}".
 
@@ -105,20 +150,15 @@ GOOD examples (short, exact spelling): "alexa", "hey alexa", "ok alexa"
 Return ONLY valid JSON, no markdown.
 Wake word (use exactly as shown): "{wake_word}"'''
 
-    response = client.models.generate_content(
-        model=os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
-        contents=prompt,
-        config={
-            "response_mime_type": "application/json",
-            "response_json_schema": {
-                "type": "object",
-                "properties": {"phrases": {"type": "array", "items": {"type": "string"}}},
-                "required": ["phrases"],
-            },
+    text = _generate_json_with_llm(
+        prompt,
+        {
+            "type": "object",
+            "properties": {"phrases": {"type": "array", "items": {"type": "string"}}},
+            "required": ["phrases"],
+            "additionalProperties": False,
         },
     )
-
-    text = response.text.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1]
         text = text.rsplit("```", 1)[0]
@@ -146,6 +186,20 @@ def generate_adversarial_from_phonemes(wake_word: str, n_samples: int = 500) -> 
         print(f"Warning: Phoneme-based adversarial generation failed: {e}")
         print("Falling back to LLM-based generation")
         return []
+
+
+def _exclude_homophones(positive: list[str], negative: list[str]) -> list[str]:
+    """Do not label identical pronunciations as both positive and negative."""
+    import pronouncing
+
+    def sequences(text):
+        alternatives = [pronouncing.phones_for_word(word) for word in text.lower().split()]
+        if not alternatives or any(not phones for phones in alternatives):
+            return set()
+        return {re.sub(r"\d", "", " ".join(words)) for words in itertools.product(*alternatives)}
+
+    positive_sequences = set().union(*(sequences(phrase) for phrase in positive))
+    return [phrase for phrase in negative if not sequences(phrase) & positive_sequences]
 
 
 class WakeWordTrainer:
@@ -177,24 +231,42 @@ class WakeWordTrainer:
         clip_length: float = 2.0,  # Must match pre-computed negative features (16 time steps)
         use_precomputed_negatives: bool = True,  # Use HuggingFace pre-computed features
         download_rirs: bool = True,  # Download MIT room impulse responses
+        pronunciation: str | None = None,
+        positive_phrases: list[str] | None = None,
+        adversarial_phrases: list[str] | None = None,
     ):
         self.wake_word = wake_word.lower().replace(" ", "_")
         self.wake_word_display = wake_word
+        self.pronunciation = (pronunciation if pronunciation is not None else wake_word).strip()
+        if not self.pronunciation:
+            raise ValueError("Pronunciation must not be empty")
+        for name, phrases in (("positive", positive_phrases), ("adversarial", adversarial_phrases)):
+            if phrases is not None and (
+                not isinstance(phrases, list) or not phrases
+                or any(not isinstance(p, str) or not p.strip() for p in phrases)
+            ):
+                raise ValueError(f"{name} phrases must be a non-empty list of strings")
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate phrases using LLM
-        print(f"Generating phrases for '{wake_word}' using Gemini...")
-        self.phrases = generate_phrases_with_llm(wake_word)
+        # Keep the deployment name separate from the text spoken by TTS.
+        if positive_phrases is None:
+            print(f"Generating phrases for '{self.pronunciation}' using Gemini...")
+            self.phrases = generate_phrases_with_llm(self.pronunciation)
+        else:
+            self.phrases = list(dict.fromkeys(positive_phrases))
         print(f"  Phrases: {self.phrases}")
 
-        # Generate adversarial phrases using phoneme overlap (official method)
-        print(f"Generating adversarial phrases using phoneme overlap...")
-        self.adversarial_phrases = generate_adversarial_from_phonemes(wake_word, n_samples=500)
+        if adversarial_phrases is None:
+            print("Generating adversarial phrases using phoneme overlap...")
+            self.adversarial_phrases = generate_adversarial_from_phonemes(self.pronunciation, n_samples=500)
+        else:
+            self.adversarial_phrases = list(dict.fromkeys(adversarial_phrases))
         if not self.adversarial_phrases:
             # Fallback: generate with LLM
             print("Using LLM fallback for adversarial phrases")
-            self.adversarial_phrases = self._generate_adversarial_with_llm(wake_word)
+            self.adversarial_phrases = self._generate_adversarial_with_llm(self.pronunciation)
+        self.adversarial_phrases = _exclude_homophones(self.phrases, self.adversarial_phrases)
         print(f"  Adversarial phrases: {len(self.adversarial_phrases)} unique phrases")
         print(f"  Examples: {self.adversarial_phrases[:10]}")
 
@@ -219,29 +291,16 @@ class WakeWordTrainer:
 
     def _generate_adversarial_with_llm(self, wake_word: str) -> list[str]:
         """Fallback: generate adversarial phrases with LLM."""
-        from dotenv import load_dotenv
-        load_dotenv()
-
-        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        if not api_key:
-            return []
-
-        client = genai.Client(api_key=api_key)
         prompt = f'''Generate 50 phonetically similar phrases to "{wake_word}" that should NOT trigger a wake word detector.
 Think about: rhymes, similar sounds, common mishearings, shared syllables.
+Exclude homophones and alternate word boundaries that produce the same sound as the target.
 Return ONLY a JSON array of strings, no explanation.
 Example: ["a lecture", "I'll ask her", "elect a"]'''
 
         try:
-            response = client.models.generate_content(
-                model=os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
-                contents=prompt,
-                config={
-                    "response_mime_type": "application/json",
-                    "response_json_schema": {"type": "array", "items": {"type": "string"}},
-                },
+            text = _generate_json_with_llm(
+                prompt, {"type": "array", "items": {"type": "string"}},
             )
-            text = response.text.strip()
             if text.startswith("```"):
                 text = text.split("\n", 1)[1].rsplit("```", 1)[0]
             return json.loads(text)
@@ -291,24 +350,17 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
     def download_background_audio(self) -> None:
         """Download background audio for mixing (AudioSet + FMA samples)."""
         self.background_dir.mkdir(parents=True, exist_ok=True)
-
-        # Download FMA sample
-        fma_dir = self.output_dir / "fma_sample"
-        if not fma_dir.exists():
-            print("Downloading FMA music samples...")
-            subprocess.run(["wget", "-q", "-O", str(self.output_dir / "fma_sample.zip"),
-                           "https://f002.backblazeb2.com/file/openwakeword-resources/data/fma_sample.zip"],
-                          check=True)
-            subprocess.run(["unzip", "-q", "-o", "fma_sample.zip"], check=True, cwd=str(self.output_dir))
-
-        # Download FSD50K sample
-        fsd_dir = self.output_dir / "fsd50k_sample"
-        if not fsd_dir.exists():
-            print("Downloading FSD50K noise samples...")
-            subprocess.run(["wget", "-q", "-O", str(self.output_dir / "fsd50k_sample.zip"),
-                           "https://f002.backblazeb2.com/file/openwakeword-resources/data/fsd50k_sample.zip"],
-                          check=True)
-            subprocess.run(["unzip", "-q", "-o", "fsd50k_sample.zip"], check=True, cwd=str(self.output_dir))
+        for name in ("fma_sample", "fsd50k_sample"):
+            if (self.output_dir / name).exists():
+                continue
+            archive = self.output_dir / f"{name}.zip"
+            if not archive.exists() or not zipfile.is_zipfile(archive):
+                print(f"Downloading {name}...")
+                temporary = archive.with_suffix(".zip.part")
+                urlretrieve(f"https://f002.backblazeb2.com/file/openwakeword-resources/data/{name}.zip", temporary)
+                temporary.replace(archive)
+            with zipfile.ZipFile(archive) as source:
+                source.extractall(self.output_dir)
 
     def download_precomputed_features(self) -> Path:
         """Download pre-computed negative features from HuggingFace (~2,000 hours)."""
@@ -319,13 +371,12 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
             return features_path
 
         print("Downloading pre-computed negative features (~2,000 hours from ACAV100M)...")
-        print("This is a large file (~4GB), please wait...")
-
-        subprocess.run([
-            "wget", "-q", "--show-progress",
-            "https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/openwakeword_features_ACAV100M_2000_hrs_16bit.npy",
-            "-O", str(features_path)
-        ], check=True)
+        print("This is a large file (~17GB), please wait...")
+        from huggingface_hub import hf_hub_download
+        hf_hub_download(
+            repo_id="davidscripka/openwakeword_features", repo_type="dataset",
+            filename=features_path.name, local_dir=self.output_dir,
+        )
 
         return features_path
 
@@ -337,11 +388,11 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
             return val_path
 
         print("Downloading validation features (~11 hours)...")
-        subprocess.run([
-            "wget", "-q", "--show-progress",
-            "https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/validation_set_features.npy",
-            "-O", str(val_path)
-        ], check=True)
+        from huggingface_hub import hf_hub_download
+        hf_hub_download(
+            repo_id="davidscripka/openwakeword_features", repo_type="dataset",
+            filename=val_path.name, local_dir=self.output_dir,
+        )
 
         return val_path
 
@@ -367,13 +418,16 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
         """Generate synthetic speech clips with Piper TTS (CUDA accelerated)."""
         from piper import PiperVoice
         from piper.config import SynthesisConfig
-        import wave
         import soundfile as sf
+        import onnxruntime as ort
 
         voice_name = voice_path.stem
         clips_generated = 0
 
-        voice = PiperVoice.load(str(voice_path), use_cuda=True)
+        use_cuda = torch.cuda.is_available() and "CUDAExecutionProvider" in ort.get_available_providers()
+        if use_cuda:
+            ort.preload_dlls()
+        voice = PiperVoice.load(str(voice_path), use_cuda=use_cuda)
 
         for phrase in phrases:
             for i in range(n_per_phrase):
@@ -388,6 +442,7 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
 
                 # Randomize synthesis parameters for diversity
                 syn_config = SynthesisConfig(
+                    speaker_id=random.randrange(voice.config.num_speakers),
                     length_scale=random.uniform(0.8, 1.2),
                     noise_scale=random.uniform(0.3, 0.7),
                     noise_w_scale=random.uniform(0.6, 1.0),
@@ -566,9 +621,11 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
 
                     # Pad or trim to target length
                     if len(audio) < total_length:
-                        audio = np.pad(audio, (0, total_length - len(audio)))
+                        padding = total_length - len(audio)
+                        trailing = random.randint(0, min(int(0.2 * 16000), padding))
+                        audio = np.pad(audio, (padding - trailing, trailing))
                     else:
-                        audio = audio[:total_length]
+                        audio = audio[-total_length:]
 
                     # Apply augmentations randomly
                     # 1. Gain variation
@@ -751,7 +808,9 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
             return 0.5 * self.target_lr * (1 + np.cos(np.pi * progress))
 
     def train_model(self, positive_features: np.ndarray, negative_features: np.ndarray,
-                    adversarial_features: np.ndarray = None) -> tuple:
+                    adversarial_features: np.ndarray = None,
+                    initial_state: dict | None = None,
+                    adversarial_fraction: float | None = None) -> tuple:
         """Train the wake word detection model with step-based training."""
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {device}")
@@ -772,12 +831,15 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
             nn.Linear(self.layer_dim, 1),
             nn.Sigmoid(),
         ).to(device)
+        if initial_state is not None:
+            model.load_state_dict(initial_state)
 
         print(model)
         total_params = sum(p.numel() for p in model.parameters())
         print(f"Total parameters: {total_params:,}")
 
-        loss_function = torch.nn.functional.binary_cross_entropy
+        logit_model = model[:-1]
+        loss_function = torch.nn.functional.binary_cross_entropy_with_logits
         optimizer = torch.optim.Adam(model.parameters(), lr=self.target_lr)
 
         # Prepare data
@@ -792,6 +854,11 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
         n_neg_per_batch = int(self.batch_size * 0.85)
         n_pos_per_batch = int(self.batch_size * 0.10)
         n_adv_per_batch = self.batch_size - n_neg_per_batch - n_pos_per_batch
+        if adversarial_fraction is not None:
+            if not 0 <= adversarial_fraction < 0.9:
+                raise ValueError("adversarial_fraction must be between 0 and 0.9")
+            n_adv_per_batch = int(self.batch_size * adversarial_fraction)
+            n_neg_per_batch = self.batch_size - n_pos_per_batch - n_adv_per_batch
 
         history = collections.defaultdict(list)
         warmup_steps = min(1000, self.steps // 10)
@@ -839,8 +906,9 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
 
             # Forward pass
             optimizer.zero_grad()
-            predictions = model(X_tensor)
-            loss = loss_function(predictions, y_tensor, weights[..., None])
+            logits = logit_model(X_tensor)
+            predictions = torch.sigmoid(logits)
+            loss = loss_function(logits, y_tensor, weights[..., None])
             loss.backward()
             optimizer.step()
 
@@ -865,7 +933,9 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
                 pbar.set_postfix({'loss': f'{avg_loss:.4f}', 'recall': f'{avg_recall:.3f}', 'lr': f'{lr:.6f}'})
 
             # Save best model
-            if recall > best_recall and step > warmup_steps:
+            # Prefer the later checkpoint on ties so an early perfect minibatch
+            # does not discard the rest of the training schedule.
+            if recall >= best_recall and step > warmup_steps:
                 best_recall = recall
                 best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
@@ -920,6 +990,7 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
 
         for clip in tqdm(test_clips, desc="Testing positive clips"):
             try:
+                oww.reset()
                 scores = oww.predict_clip(str(clip))
                 max_score = max([s[self.wake_word] for s in scores])
                 if max_score >= 0.5:
@@ -944,6 +1015,7 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
         """Run the full training pipeline."""
         print("=" * 60)
         print(f"Training wake word model for: {self.wake_word_display}")
+        print(f"Spoken form: {self.pronunciation}")
         print("=" * 60)
         print(f"Configuration:")
         print(f"  Positive samples: {self.n_samples}")
@@ -1042,7 +1114,12 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
         # Step 4: Compute features
         print("\n=== Step 4: Computing audio features ===")
         self.download_openwakeword_models()
-        feature_extractor = openwakeword.utils.AudioFeatures()
+        if torch.cuda.is_available():
+            import onnxruntime as ort
+            ort.preload_dlls()
+        feature_extractor = openwakeword.utils.AudioFeatures(
+            inference_framework="onnx", device="gpu" if torch.cuda.is_available() else "cpu",
+        )
 
         positive_features = self.compute_positive_features(feature_extractor)
         adversarial_features = self.compute_adversarial_features(feature_extractor)
@@ -1067,6 +1144,7 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
         # Step 5: Train model
         print("\n=== Step 5: Training model ===")
         model, history = self.train_model(positive_features, negative_features, adversarial_features)
+        (self.output_dir / f"{self.wake_word}_training_history.json").write_text(json.dumps(history))
 
         # Step 6: Export to ONNX
         print("\n=== Step 6: Exporting model ===")
@@ -1082,6 +1160,6 @@ Example: ["a lecture", "I'll ask her", "elect a"]'''
         print("=" * 60)
         print(f"Model saved to: {output_path}")
         print(f"\nUsage with openWakeWord:")
-        print(f"  oww = openwakeword.Model(wakeword_model_paths=['{output_path}'])")
+        print(f"  oww = openwakeword.Model(wakeword_models=['{output_path}'], inference_framework='onnx')")
 
         return output_path

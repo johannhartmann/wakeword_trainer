@@ -127,6 +127,7 @@ cython_debug/
 *.swo
 
 # Training data and outputs
+/runs/
 *_clips/
 *_clips_augmented/
 *_adversarial/

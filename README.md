@@ -75,8 +75,8 @@ replacement to download; updating them requires retraining.
 
 - Python 3.11+ (Python 3.12 recommended)
 - CUDA-capable GPU (recommended, 8GB+ VRAM)
-- ~15GB disk space for training data and pre-computed features
-- Gemini API key for phrase generation
+- ~20GB disk space for shared data and voices, plus space for generated clips and features
+- OpenRouter API key or Gemini API key for phrase generation
 
 Python 3.10 is no longer supported because Pillow 13's security fixes require
 Python 3.11 or newer. Pillow 13 is an explicit minimum so dependency resolution
@@ -138,6 +138,8 @@ wakeword-trainer <wake_word> [options]
 |--------|---------|-------------|
 | `--output-dir`, `-o` | `.` | Output directory for model and data |
 | `--n-samples` | `10000` | Number of positive samples to generate (recommended: 50,000-100,000) |
+| `--pronunciation` | wake word | Spoken form for TTS and adversarial generation, e.g. `may stack` |
+| `--phrases-file` | - | JSON file containing `positive` and `adversarial` phrase arrays |
 | `--augmentation-rounds` | `1` | Number of augmentation rounds per clip |
 | `--steps` | `50000` | Number of training steps |
 | `--batch-size` | `2048` | Training batch size (recommended: 1024-4096) |
@@ -153,6 +155,13 @@ wakeword-trainer <wake_word> [options]
 ### Examples
 
 ```bash
+# Train "maistack", pronounced like "may" + "stack", using Gemini through OpenRouter
+# OPENROUTER_API_KEY can be set in ~/.env; the home file's other keys are not loaded.
+wakeword-trainer maistack --pronunciation "may stack" --output-dir runs/maistack
+
+# Reproduce a run using its saved, reviewed phrase list
+wakeword-trainer maistack --pronunciation "may stack" --phrases-file configs/maistack.phrases.json --output-dir runs/maistack
+
 # Train "hey jarvis" wake word with production settings
 wakeword-trainer "hey jarvis" --n-samples 50000 --steps 50000
 
@@ -218,6 +227,27 @@ if prediction['jarvis'] > 0.5:
 
 ## Output Files
 
+### Maistack model
+
+`models/maistack.onnx` recognizes **maistack**, pronounced **may + stack**.
+Use consecutive-frame confirmation with this model:
+
+```python
+from wakeword_trainer.detector import WakeWordDetector
+
+detector = WakeWordDetector("models/maistack.onnx", threshold=0.5, confirmation_frames=4)
+# Each chunk is 1280 mono int16 samples at 16 kHz (80 ms).
+if detector.process(audio_chunk):
+    print("Maistack detected")
+```
+
+Synthetic validation with this preset detected 208/250 positive clips and
+triggered on 10/282 deliberately similar negative phrases. The reserved
+5.35-hour background segment produced 3 trigger episodes (about 0.56/hour).
+These figures do not establish accuracy on human microphone recordings.
+See `models/maistack.json` for settings and training provenance. The raw model
+without confirmation produces substantially more false triggers.
+
 ```
 output_dir/
 ├── jarvis.onnx                                    # Trained model (use this!)
@@ -256,7 +286,9 @@ With recommended settings (50k samples, 50k steps):
 
 | Variable | Description |
 |----------|-------------|
-| `GEMINI_API_KEY` | Required. Gemini API key for phrase generation |
+| `OPENROUTER_API_KEY` | Gemini through OpenRouter; read from the environment, local `.env`, or `~/.env`. Takes precedence over direct Gemini access. |
+| `OPENROUTER_MODEL` | Optional. OpenRouter slug (default: `google/gemini-4-hydrogen`) |
+| `GEMINI_API_KEY` | Alternative: direct Gemini API key for phrase generation |
 | `GOOGLE_API_KEY` | Alternative to GEMINI_API_KEY |
 | `GEMINI_MODEL` | Optional. Phrase generation model (default: `gemini-4-hydrogen`) |
 

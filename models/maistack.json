@@ -1,0 +1,48 @@
+{
+  "wake_word": "maistack",
+  "pronunciation": "may + stack",
+  "ipa": "/me\u026ast\u00e6k/",
+  "model_file": "maistack.onnx",
+  "sha256": "eb8a51cf341af83e019fb4855cf0247e4e25c6334b70d08151472b213631fd09",
+  "sample_rate": 16000,
+  "frame_samples": 1280,
+  "threshold": 0.5,
+  "confirmation_frames": 4,
+  "inference_helper": "wakeword_trainer.detector.WakeWordDetector",
+  "status": "trained; synthetic validation only, real microphone validation pending",
+  "validation": {
+    "threshold": 0.5,
+    "confirmation_frames": 4,
+    "positive_detected": 208,
+    "positive_total": 250,
+    "hard_negative_triggers": 10,
+    "hard_negative_total": 282,
+    "background_false_trigger_episodes": 3,
+    "background_episodes_per_hour": 0.560927067016242
+  },
+  "background_hours": 5.348288888888889,
+  "background_evaluation_start_frame": 240672,
+  "training": {
+    "positive_feature_windows": 11440,
+    "initial_adversarial_windows": 1879,
+    "streaming_negative_windows": 82381,
+    "base_steps": 50000,
+    "hard_negative_steps": 15000,
+    "stable_loss_finetune_steps": 15000,
+    "final_hard_negative_fraction": 0.3,
+    "llm_model": "google/gemini-4-hydrogen via OpenRouter",
+    "piper_revision": "e9ab671f2a0e50a701b34361136ba3e6a3a9eb0c",
+    "feature_model_release": "v0.5.1",
+    "phrase_file": "configs/maistack.phrases.json"
+  },
+  "evaluation_voices": [
+    "en_US-ryan-high",
+    "en_GB-alan-medium",
+    "en_US-hfc_female-medium"
+  ],
+  "limitations": [
+    "Synthetic evaluation voices were excluded from training; the first two were used for iterative diagnostics.",
+    "First half of background features was used for hard-negative training; reported background metrics use only the second half.",
+    "Threshold and confirmation were selected using the validation set; performance on new recordings may differ."
+  ]
+}

@@ -21,7 +21,9 @@ Examples:
   wakeword-trainer alexa --n-samples 100000 --steps 100000 --batch-size 4096
 
 Environment variables:
-  GEMINI_API_KEY or GOOGLE_API_KEY    Required. API key for Gemini LLM.
+  OPENROUTER_API_KEY                 Gemini through OpenRouter (also read from ~/.env).
+  OPENROUTER_MODEL                   Optional. OpenRouter model slug.
+  GEMINI_API_KEY or GOOGLE_API_KEY    Alternative: direct Gemini API access.
   GEMINI_MODEL                       Optional. Gemini model for phrase generation.
 
 Official recommendations:
@@ -48,6 +50,14 @@ Official recommendations:
     )
 
     # Data generation
+    parser.add_argument(
+        "--pronunciation",
+        help="Spoken form for synthesis and adversarial generation (e.g. 'may stack')"
+    )
+    parser.add_argument(
+        "--phrases-file",
+        help="JSON file with positive and adversarial phrase arrays; avoids Gemini when both are supplied"
+    )
     parser.add_argument(
         "--n-samples",
         type=int,
@@ -138,6 +148,16 @@ Official recommendations:
 
     from .trainer import WakeWordTrainer
 
+    phrase_options = {}
+    if args.phrases_file:
+        import json
+        from pathlib import Path
+        phrases = json.loads(Path(args.phrases_file).read_text())
+        phrase_options = {
+            "positive_phrases": phrases["positive"],
+            "adversarial_phrases": phrases["adversarial"],
+        }
+
     trainer = WakeWordTrainer(
         wake_word=args.wake_word,
         output_dir=args.output_dir,
@@ -150,6 +170,8 @@ Official recommendations:
         clip_length=args.clip_length,
         use_precomputed_negatives=not args.no_precomputed_negatives,
         download_rirs=not args.no_rirs,
+        pronunciation=args.pronunciation,
+        **phrase_options,
     )
 
     try:
